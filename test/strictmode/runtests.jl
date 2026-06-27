@@ -44,33 +44,32 @@ end
 end
 
 @testset "stage-1 SIMD classifier — StrictMode guarantees" begin
+    # The SIMD work lives in `_scan_wide` (the out-of-line long-string kernel); `_string_scan_simd` /
+    # `parsestring` keep a scalar fast-path for short strings, so the vector guarantees target `_scan_wide`.
     buf = Vector{UInt8}(codeunits(repeat("a", 256) * "\""))
     n = length(buf)
     GC.@preserve buf begin
         p = pointer(buf)
-        JSON._string_scan_simd(p, 1, n)                       # warm up codegen
-        # The classifier must lower to a vector compare (<64 x i8> in the LLVM IR).
-        @assert_vectorized JSON._string_scan_simd(p, 1, n)
-        # And it must run without heap allocation …
-        @assert_noalloc    JSON._string_scan_simd(p, 1, n)
-        # … and be type-stable (returns Int).
-        @assert_typestable JSON._string_scan_simd(p, 1, n)
+        JSON._scan_wide(p, 1, n)                              # warm up codegen
+        @assert_vectorized JSON._scan_wide(p, 1, n)           # <64 x i8> in the LLVM IR
+        @assert_noalloc    JSON._scan_wide(p, 1, n)           # no heap allocation
+        @assert_typestable JSON._scan_wide(p, 1, n)           # returns Int
     end
 end
 
 @testset "stage-1 SIMD classifier — F32 dogfood (per-loop @assert_no_scalar_loops)" begin
-    # This is the StrictMode finding from this POC, fed back and FIXED (StrictMode F32). The kernel has
+    # This is the StrictMode finding from this POC, fed back and FIXED (StrictMode F32). `_scan_wide` has
     # a SIMD main loop (`<64 x i8>`) AND a bounded scalar tail loop. BEFORE the fix, `scalar_fp_loops`
     # short-circuited on `_vectorized(f) && return false`, so it was a FALSE-NEGATIVE — the scalar tail
     # was invisible and `@assert_no_scalar_loops` wrongly passed. AFTER the per-loop fix it correctly
     # SEES the tail. We exercise the fixed behavior here:
-    @test StrictMode.scalar_fp_loops(JSON._string_scan_simd, (Ptr{UInt8}, Int, Int)) == true
+    @test StrictMode.scalar_fp_loops(JSON._scan_wide, (Ptr{UInt8}, Int, Int)) == true
     buf = Vector{UInt8}(codeunits(repeat("a", 256) * "\""))
     n = length(buf)
     GC.@preserve buf begin
         p = pointer(buf)
-        JSON._string_scan_simd(p, 1, n)
-        @test_throws StrictViolation (@assert_no_scalar_loops JSON._string_scan_simd(p, 1, n))
+        JSON._scan_wide(p, 1, n)
+        @test_throws StrictViolation (@assert_no_scalar_loops JSON._scan_wide(p, 1, n))
     end
     # The tail is ACCEPTED (a bounded < 64-byte remainder, like an auto-vectorization epilogue) — F32's
     # value is making it VISIBLE so the decision is explicit, not silently hidden by a coexisting `<N x>`.

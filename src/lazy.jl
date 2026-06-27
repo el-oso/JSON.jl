@@ -469,19 +469,16 @@ function parsestring(x::LazyValue)
     pos += 1
     spos = pos
     escaped = false
-    # POC: stage-1 SIMD classifier jumps to the next string-boundary byte ('"', '\\', or control)
-    # instead of scanning one byte at a time. Semantics are identical to the old byte loop: on '\\'
-    # skip the escaped byte (pos += 2), on a control byte raise, on '"' the string ends.
-    while true
-        pos = _string_scan(buf, pos, len)
-        if pos > len
-            error = UnexpectedEOF
-            @goto invalid
-        end
-        b = getbyte(buf, pos)
-        if b == UInt8('"')
-            break
-        elseif b == UInt8('\\')
+    # POC: the ORIGINAL tight byte loop is kept verbatim for the common short-string case (so short
+    # strings stay at baseline cost — no per-string wrapper/pointer/SIMD setup). Only once a string has
+    # run past `_SCALAR_WINDOW` scalar bytes do we fast-forward to the next string-boundary byte with the
+    # out-of-line SIMD scan (`_scan_fwd` → `_scan_wide`), where the 64-byte window amortizes. Short
+    # strings never materialize any SIMD machinery; the byte semantics are identical to the old loop.
+    @nextbyte(false)
+    nscanned = 0
+    while b != UInt8('"')
+        b <= UInt8(0x1F) && unescaped_control(b)
+        if b == UInt8('\\')
             escaped = true
             if pos + 2 > len
                 error = UnexpectedEOF
@@ -489,9 +486,16 @@ function parsestring(x::LazyValue)
             end
             pos += 2
         else
-            # raw control character within a JSON string is disallowed
-            unescaped_control(b)
+            pos += 1
         end
+        if (nscanned += 1) >= _SCALAR_WINDOW   # long string → SIMD fast-forward (no-op for exotic bufs)
+            pos = _scan_fwd(buf, pos, len)
+            if pos > len
+                error = UnexpectedEOF
+                @goto invalid
+            end
+        end
+        @nextbyte(false)
     end
     str = PtrString(pointer(buf, spos), pos - spos, escaped)
     return str, pos + 1
