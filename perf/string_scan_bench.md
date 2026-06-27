@@ -12,56 +12,63 @@ are 4 MiB arrays of `{id, a, b, c}` records whose three string fields are each e
 **Setup:** single-thread, `julia -O3 -t1`, `taskset -c 4` (SMT sibling idle), `RAYON_NUM_THREADS=1`,
 median of 400 reps with `GC.gc()` between and a DCE sink. `simd-json` = the Rust crate's `to_tape`
 (via the BlazingPorts `bp_simdjson_parse` shim) on the *same* bytes — it must copy the input first (it
-unescapes in place), which is ~1% of its time. Machine: Zen5, 4.5 GHz. Reproduce with
-[`string_scan_bench.jl`](string_scan_bench.jl).
+unescapes in place), which is ~1% of its time. Machine: Zen5; this run pinned to a quiet core (`taskset
+-c 11`) for low noise rather than a peak-boost core, so absolute GB/s is conservative but the three-way
+comparison is clean. Reproduce with [`string_scan_bench.jl`](string_scan_bench.jl).
 
 ![isvalidjson GB/s vs string length](string_scan_bench.png)
 
 (Regenerate the plot from the saved data with [`plot_string_scan.jl`](plot_string_scan.jl).)
 
-## Results (GB/s, higher is better)
+## Results
 
-| string len | stock JSON.jl | this branch | simd-json (Rust) | branch / stock | branch / simd-json |
-|-----------:|--------------:|------------:|-----------------:|---------------:|-------------------:|
-|   4 | 0.595 |  0.606 | 0.353 | 1.02× | **1.72×** |
-|   8 | 0.730 |  0.719 | 0.428 | 0.99× | **1.68×** |
-|  12 | 0.836 |  0.824 | 0.970 | 0.99× | 0.85× |
-|  16 | 1.008 |  0.765 | 1.106 | **0.76×** | 0.69× |
-|  24 | 1.025 |  0.915 | 1.299 | 0.89× | 0.70× |
-|  32 | 1.196 |  0.937 | 1.495 | **0.78×** | 0.63× |
-|  48 | 1.391 |  1.341 | 1.723 | 0.96× | 0.78× |
-|  64 | 1.644 |  1.785 | 1.888 | 1.09× | 0.95× |
-|  96 | 1.612 |  2.513 | 2.272 | 1.56× | 1.11× |
-| 128 | 1.735 |  3.248 | 2.444 | 1.87× | 1.33× |
-| 256 | 2.210 |  5.960 | 2.883 | 2.70× | 2.07× |
-| 512 | 2.623 | 10.710 | 3.117 | 4.08× | **3.44×** |
+Each of the three "GB/s" columns is an **absolute throughput** (document bytes ÷ median parse time,
+**higher = better**) — they are independent measurements, *not* ratios of each other. The two `×`
+columns *are* ratios, computed from those GB/s (`<1` = the branch is slower, `>1` = faster). Numbers are
+a clean same-core run (core 11, σ ≤ 8% except where noted); absolute GB/s is lower than a boosted core,
+but the branch/stock/simd-json comparison is apples-to-apples.
 
-(`simd-json` column from the branch run; the stock run measured it within run-to-run noise, ≤10%.)
+| string len (B) | stock JSON.jl (GB/s) | this branch (GB/s) | simd-json (GB/s) | branch ÷ stock | branch ÷ simd-json |
+|---------------:|---------------------:|-------------------:|-----------------:|---------------:|-------------------:|
+|   4 | 0.475 | 0.426 | 0.278 | 0.90× | **1.53×** |
+|   8 | 0.571 | 0.531 | 0.342 | 0.93× | **1.55×** |
+|  12 | 0.683 | 0.602 | 0.753 | 0.88× | 0.80× |
+|  16 | 0.772 | 0.647 | 0.867 | **0.84×** | 0.75× |
+|  24 | 0.786 | 0.780 | 1.013 | 0.99×¹ | 0.77× |
+|  32 | 0.914 | 0.778 | 1.161 | **0.85×** | 0.67× |
+|  48 | 1.097 | 1.172 | 1.349 | **1.07×** | 0.87× |
+|  64 | 1.242 | 1.486 | 1.468 | 1.20× | 1.01× |
+|  96 | 1.239 | 2.061 | 1.789 | 1.66× | 1.15× |
+| 128 | 1.296 | 2.672 | 1.934 | 2.06× | 1.38× |
+| 256 | 1.671 | 4.871 | 2.293 | 2.92× | 2.12× |
+| 512 | 1.990 | 8.790 | 3.119 | **4.42×** | 2.82× |
+
+¹ stock σ=14% at L=24; treat that ratio as noisy.
 
 ## Reading the curve
 
-- **Long strings (≥ 64 B): a clear, growing win.** The branch overtakes stock at ~64 B and reaches
-  **4.1× stock / 3.4× simd-json at 512 B** — the SIMD classifier scans content at memory-bandwidth speed
-  while the scalar loop plods byte-by-byte. This is the regime the change is for (text blobs, base64,
-  long descriptions, embedded documents).
-- **Very short strings (≤ 12 B): parity** with stock. They never leave the scalar fast-path, so they
-  cost the same (here the branch even edges out simd-json, whose fixed per-document tape overhead
-  dominates when records are tiny).
-- **Medium strings (16–48 B): a regression valley** — the branch is **0.76–0.96× stock** (worst ~24% at
-  16 B). **Root cause (from `code_native`, not the noisy timings):** the SIMD fast-forward is a
-  `@noinline` *call* inside `parsestring`'s string loop, which makes `parsestring` a **non-leaf
-  function** — it must push/pop 5 callee-saved registers per string and keep loop-carried state across
-  the (cold) call, **doubling the loop body (50 vs 26 instructions)** versus stock's clean leaf loop.
-  Strings too short to leave the scalar window never take the call but still pay this. (The per-byte
-  window counter is secondary, ~8%.) The shape follows: ≤12 B the per-string fixed costs hide the
-  bulkier loop (parity); 16–48 B the loop dominates and SIMD hasn't kicked in (valley); ≥64 B SIMD wins.
+- **Long strings (≥ 48 B): a growing win.** The branch overtakes stock at ~48 B and reaches **4.4×
+  stock / 2.8× simd-json at 512 B** — the SIMD classifier scans content at memory-bandwidth speed while
+  the scalar loop plods byte-by-byte. This is the regime the change is for (text blobs, base64, long
+  descriptions, embedded documents).
+- **Short/medium strings (≤ 32 B): a ~10–16 % regression**, deepest (~16 %) around 16–32 B. Even
+  4–8 B strings are ~7–10 % slower (the branch still beats simd-json there, whose fixed per-document
+  tape overhead dominates on tiny records — but that's a comparison to Rust, not to stock JSON.jl).
+- **Root cause (from `code_native`, not the noisy timings):** adding the SIMD path makes `parsestring`'s
+  string loop bigger and changes its shape. The original cold-`@noinline`-call design was worse — the
+  call made `parsestring` *non-leaf*, forcing 5 callee-saved push/pops per string and ~doubling the loop
+  (26 → 50 instructions). **Inlining the scan** (this branch) removes the call so `parsestring` stays a
+  leaf (which is why the bottom is ~16 % here, not ~24 %, and the stock cross-over moved from ~64 B to
+  ~48 B), but the inline `Vec{64,UInt8}` scan + scalar-window logic still makes the function ~3× the
+  instruction count of stock's minimal tight loop. That residual size is the remaining short/medium tax;
+  ≥48 B the SIMD throughput outweighs it.
 
-**Net:** a strong win when strings are long, parity when they're tiny, and a medium-string valley. Whether
-that trade is worth it depends on the workload — string-heavy/long-field JSON benefits a lot; uniformly
-short-field JSON (many 16–48 B keys/values) regresses. **Fix direction:** move the hot scalar scan into
-its own *leaf* helper (no call in its body) so `parsestring`'s per-string loop stays leaf-tight, and only
-`parsestring` (not the loop) dispatches to the SIMD path for long strings — that removes the non-leaf tax
-from the short/medium path while keeping the long-string win.
+**Net:** a strong, growing win for strings ≥ 48 B, and a ~10–16 % tax for strings ≤ 32 B. Whether the
+trade is worth it depends on the workload — string-heavy/long-field JSON (descriptions, text, base64,
+embedded blobs) benefits a lot; JSON that is overwhelmingly short keys/values regresses. **Remaining
+lever:** the short/medium tax is now purely the *size* of the inlined scan (parsestring is ~3× stock's
+instruction count). Shrinking it — a smaller/branchless scalar window, or only compiling the SIMD path
+in for buffer types where it pays — would narrow the tax further without losing the long-string win.
 
 ## Caveats
 
