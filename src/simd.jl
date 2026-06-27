@@ -71,11 +71,3 @@ end
     i > len && return len + 1            # window hit EOF without a boundary
     return _scan_wide(p, i, len)         # string longer than the window → wide SIMD
 end
-
-# Long-string fast-forward, called by `parsestring` ONCE a string has exceeded the scalar window.
-# Contiguous byte buffers (Vector{UInt8} / String / CodeUnits) jump to the next boundary via the
-# out-of-line SIMD scan; for any other (exotic) AbstractVector{UInt8}/AbstractString it is a no-op that
-# returns `pos` — the caller's scalar loop keeps advancing one byte at a time (correct, just not SIMD).
-@inline _scan_fwd(buf::Union{Vector{UInt8},Base.CodeUnits{UInt8,String},String}, pos::Int, len::Int) =
-    GC.@preserve buf _scan_wide(pointer(buf isa Base.CodeUnits ? buf.s : buf), pos, len)
-@inline _scan_fwd(buf, pos::Int, len::Int) = pos

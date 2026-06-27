@@ -469,33 +469,74 @@ function parsestring(x::LazyValue)
     pos += 1
     spos = pos
     escaped = false
-    # POC: the ORIGINAL tight byte loop is kept verbatim for the common short-string case (so short
-    # strings stay at baseline cost — no per-string wrapper/pointer/SIMD setup). Only once a string has
-    # run past `_SCALAR_WINDOW` scalar bytes do we fast-forward to the next string-boundary byte with the
-    # out-of-line SIMD scan (`_scan_fwd` → `_scan_wide`), where the 64-byte window amortizes. Short
-    # strings never materialize any SIMD machinery; the byte semantics are identical to the old loop.
-    @nextbyte(false)
-    nscanned = 0
-    while b != UInt8('"')
-        b <= UInt8(0x1F) && unescaped_control(b)
-        if b == UInt8('\\')
-            escaped = true
-            if pos + 2 > len
+    # POC: for contiguous byte buffers, find the string's end with an inline scalar window + SIMD
+    # classifier (a scalar fast-path for the first `_SCALAR_WINDOW` bytes, then a 64-byte `Vec{64,UInt8}`
+    # scan for long content). The scan is written INLINE — NOT behind a call — on purpose: a (cold) call
+    # in this loop would make `parsestring` carry per-string callee-saved spills and roughly double the
+    # loop body, which is the medium-string regression "valley" (see `perf/string_scan_bench.md`). Byte
+    # semantics are identical to the scalar loop: '\\' skips the escaped byte, a control byte raises, '"'
+    # ends the string. Exotic AbstractVector{UInt8}/AbstractString buffers keep the plain scalar loop.
+    if buf isa Union{Vector{UInt8}, Base.CodeUnits{UInt8, String}, String}
+        p = pointer(buf isa Base.CodeUnits ? buf.s : buf)
+        @inbounds while true
+            bnd = 0                                            # 1-based boundary index; 0 = not found yet
+            wstop = min(pos + _SCALAR_WINDOW - 1, len)         # scalar window (short strings finish here)
+            while pos <= wstop
+                b = unsafe_load(p, pos)
+                _is_string_boundary(b) && (bnd = pos; break)
+                pos += 1
+            end
+            if bnd == 0                                        # long string → wide SIMD
+                vq = Vec{_SIMD_W,UInt8}(0x22); vbk = Vec{_SIMD_W,UInt8}(0x5C); vct = Vec{_SIMD_W,UInt8}(0x20)
+                while pos + _SIMD_W - 1 <= len
+                    c = vload(Vec{_SIMD_W,UInt8}, p + (pos - 1))
+                    bm = bitmask((c == vq) | (c == vbk) | (c < vct))
+                    bm != zero(bm) && (bnd = pos + trailing_zeros(bm); break)
+                    pos += _SIMD_W
+                end
+                if bnd == 0                                    # scalar tail (< 64 bytes from the end)
+                    while pos <= len
+                        b = unsafe_load(p, pos)
+                        _is_string_boundary(b) && (bnd = pos; break)
+                        pos += 1
+                    end
+                end
+            end
+            if bnd == 0
                 error = UnexpectedEOF
                 @goto invalid
             end
-            pos += 2
-        else
-            pos += 1
-        end
-        if (nscanned += 1) >= _SCALAR_WINDOW   # long string → SIMD fast-forward (no-op for exotic bufs)
-            pos = _scan_fwd(buf, pos, len)
-            if pos > len
-                error = UnexpectedEOF
-                @goto invalid
+            pos = bnd
+            b = unsafe_load(p, pos)
+            if b == UInt8('"')
+                break
+            elseif b == UInt8('\\')
+                escaped = true
+                if pos + 2 > len
+                    error = UnexpectedEOF
+                    @goto invalid
+                end
+                pos += 2
+            else
+                unescaped_control(b)                           # raw control byte: disallowed
             end
         end
+    else
         @nextbyte(false)
+        while b != UInt8('"')
+            b <= UInt8(0x1F) && unescaped_control(b)
+            if b == UInt8('\\')
+                escaped = true
+                if pos + 2 > len
+                    error = UnexpectedEOF
+                    @goto invalid
+                end
+                pos += 2
+            else
+                pos += 1
+            end
+            @nextbyte(false)
+        end
     end
     str = PtrString(pointer(buf, spos), pos - spos, escaped)
     return str, pos + 1
