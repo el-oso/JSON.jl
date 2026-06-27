@@ -469,12 +469,19 @@ function parsestring(x::LazyValue)
     pos += 1
     spos = pos
     escaped = false
-    @nextbyte(false)
-    while b != UInt8('"')
-        # disallow raw control characters within a JSON string
-        b <= UInt8(0x1F) && unescaped_control(b)
-        if b == UInt8('\\')
-            # skip next character
+    # POC: stage-1 SIMD classifier jumps to the next string-boundary byte ('"', '\\', or control)
+    # instead of scanning one byte at a time. Semantics are identical to the old byte loop: on '\\'
+    # skip the escaped byte (pos += 2), on a control byte raise, on '"' the string ends.
+    while true
+        pos = _string_scan(buf, pos, len)
+        if pos > len
+            error = UnexpectedEOF
+            @goto invalid
+        end
+        b = getbyte(buf, pos)
+        if b == UInt8('"')
+            break
+        elseif b == UInt8('\\')
             escaped = true
             if pos + 2 > len
                 error = UnexpectedEOF
@@ -482,9 +489,9 @@ function parsestring(x::LazyValue)
             end
             pos += 2
         else
-            pos += 1
+            # raw control character within a JSON string is disallowed
+            unescaped_control(b)
         end
-        @nextbyte(false)
     end
     str = PtrString(pointer(buf, spos), pos - spos, escaped)
     return str, pos + 1

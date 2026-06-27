@@ -57,6 +57,7 @@ end
 end
 
 include("utils.jl")
+include("simd.jl")   # stage-1 SIMD string classifier (POC); uses getbyte from utils.jl
 include("object.jl")
 
 # default object type for parse

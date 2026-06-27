@@ -1,0 +1,8 @@
+[deps]
+AllocCheck = "9b6a8646-10ed-4001-bbdc-1d2f46dfbb1a"
+JET = "c3a54625-cd67-489e-a8e7-0a5a0ff4e31b"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SIMD = "fdea26ae-647d-5447-a871-4b548cad5224"
+StrictMode = "0e98b4f4-d0e6-42ac-af0a-707c24852f32"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
