@@ -48,14 +48,20 @@ unescapes in place), which is ~1% of its time. Machine: Zen5, 4.5 GHz. Reproduce
   cost the same (here the branch even edges out simd-json, whose fixed per-document tape overhead
   dominates when records are tiny).
 - **Medium strings (16–48 B): a regression valley** — the branch is **0.76–0.96× stock** (worst ~24% at
-  16 B). These strings are too long to finish inside the scalar window but too short to amortize the
-  64-byte SIMD window, and they still pay the per-byte "have I passed the window yet?" check that the
-  original tight loop doesn't have. This is the honest cost of the current `_SCALAR_WINDOW = 32` split.
+  16 B). **Root cause (from `code_native`, not the noisy timings):** the SIMD fast-forward is a
+  `@noinline` *call* inside `parsestring`'s string loop, which makes `parsestring` a **non-leaf
+  function** — it must push/pop 5 callee-saved registers per string and keep loop-carried state across
+  the (cold) call, **doubling the loop body (50 vs 26 instructions)** versus stock's clean leaf loop.
+  Strings too short to leave the scalar window never take the call but still pay this. (The per-byte
+  window counter is secondary, ~8%.) The shape follows: ≤12 B the per-string fixed costs hide the
+  bulkier loop (parity); 16–48 B the loop dominates and SIMD hasn't kicked in (valley); ≥64 B SIMD wins.
 
 **Net:** a strong win when strings are long, parity when they're tiny, and a medium-string valley. Whether
 that trade is worth it depends on the workload — string-heavy/long-field JSON benefits a lot; uniformly
-short-field JSON (many 16–32 B keys/values) regresses. The valley is the obvious tuning target:
-`_SCALAR_WINDOW` and the per-byte window check (e.g. a branchless or unrolled prefix) both move it.
+short-field JSON (many 16–48 B keys/values) regresses. **Fix direction:** move the hot scalar scan into
+its own *leaf* helper (no call in its body) so `parsestring`'s per-string loop stays leaf-tight, and only
+`parsestring` (not the loop) dispatches to the SIMD path for long strings — that removes the non-leaf tax
+from the short/medium path while keeping the long-string win.
 
 ## Caveats
 
