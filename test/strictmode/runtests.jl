@@ -55,5 +55,11 @@ end
         @assert_noalloc    JSON._string_scan_simd(p, 1, n)
         # … and be type-stable (returns Int).
         @assert_typestable JSON._string_scan_simd(p, 1, n)
+        # No scalar hot loop "leaks" between the vector work. NOTE (StrictMode feedback): this PASSES
+        # even though the kernel has a bounded scalar tail — `scalar_fp_loops` is function-level (it
+        # flags a scalar loop only when NO `<N x …>` op is present anywhere). Since the main loop emits
+        # `<64 x i8>`, the tail isn't flagged. Good here (the tail is < 64 iters, LLVM handles it), but
+        # it means the guarantee wouldn't catch a scalar tail inside an otherwise-vectorized function.
+        @assert_no_scalar_loops JSON._string_scan_simd(p, 1, n)
     end
 end

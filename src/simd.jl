@@ -8,6 +8,15 @@
 #
 # Pure SIMD.jl — the source carries NO StrictMode dependency (mirrors the BlazingPorts discipline); the
 # `@assert_vectorized` / `@assert_noalloc` guarantees on this kernel live in `test/` only.
+#
+# POC result (4 MiB doc, single-thread, vs the simd-json Rust crate's tape build):
+#   * kernel alone: ~28× the scalar byte loop at finding string boundaries (80 vs 2.8 GB/s).
+#   * end-to-end `isvalidjson` is WORKLOAD-DEPENDENT — the win only lands when strings are long:
+#       long strings (200–600 ch):  6.0 GB/s  vs simd-json 1.5  = 4.0× FASTER
+#       short strings (4–12 ch):    0.57 GB/s vs simd-json 0.97 = 0.58× (no gain — string scanning is
+#                                   not the bottleneck; structure/number/whitespace scanning, unchanged
+#                                   here, dominates, and the 64-byte SIMD setup doesn't amortize).
+#   Beating simd-json on *typical* (short-string) JSON would need stage-1 across the WHOLE pipeline.
 using SIMD: Vec, vload, bitmask
 
 const _SIMD_W = 64   # Vec{64,UInt8}: full AVX-512 zmm width
