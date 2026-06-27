@@ -17,6 +17,11 @@
 #                                   not the bottleneck; structure/number/whitespace scanning, unchanged
 #                                   here, dominates, and the 64-byte SIMD setup doesn't amortize).
 #   Beating simd-json on *typical* (short-string) JSON would need stage-1 across the WHOLE pipeline.
+#   A scalar-first window (scan N bytes scalar before going SIMD) was tried to fix short strings and
+#   REGRESSED both (SIMD already beats the scalar scan from len ≥ 8, per micro-bench) — so the overshoot
+#   was never the cost; the short-string deficit is SIMD *integration* overhead in the per-string lazy
+#   loop, which a string-only kernel can't recover. The scalar tail is flagged by StrictMode F32 (the
+#   per-loop `@assert_no_scalar_loops` this POC prompted) and accepted as a bounded epilogue (see test/).
 using SIMD: Vec, vload, bitmask
 
 const _SIMD_W = 64   # Vec{64,UInt8}: full AVX-512 zmm width

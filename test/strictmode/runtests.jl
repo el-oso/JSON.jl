@@ -55,11 +55,23 @@ end
         @assert_noalloc    JSON._string_scan_simd(p, 1, n)
         # … and be type-stable (returns Int).
         @assert_typestable JSON._string_scan_simd(p, 1, n)
-        # No scalar hot loop "leaks" between the vector work. NOTE (StrictMode feedback): this PASSES
-        # even though the kernel has a bounded scalar tail — `scalar_fp_loops` is function-level (it
-        # flags a scalar loop only when NO `<N x …>` op is present anywhere). Since the main loop emits
-        # `<64 x i8>`, the tail isn't flagged. Good here (the tail is < 64 iters, LLVM handles it), but
-        # it means the guarantee wouldn't catch a scalar tail inside an otherwise-vectorized function.
-        @assert_no_scalar_loops JSON._string_scan_simd(p, 1, n)
     end
+end
+
+@testset "stage-1 SIMD classifier — F32 dogfood (per-loop @assert_no_scalar_loops)" begin
+    # This is the StrictMode finding from this POC, fed back and FIXED (StrictMode F32). The kernel has
+    # a SIMD main loop (`<64 x i8>`) AND a bounded scalar tail loop. BEFORE the fix, `scalar_fp_loops`
+    # short-circuited on `_vectorized(f) && return false`, so it was a FALSE-NEGATIVE — the scalar tail
+    # was invisible and `@assert_no_scalar_loops` wrongly passed. AFTER the per-loop fix it correctly
+    # SEES the tail. We exercise the fixed behavior here:
+    @test StrictMode.scalar_fp_loops(JSON._string_scan_simd, (Ptr{UInt8}, Int, Int)) == true
+    buf = Vector{UInt8}(codeunits(repeat("a", 256) * "\""))
+    n = length(buf)
+    GC.@preserve buf begin
+        p = pointer(buf)
+        JSON._string_scan_simd(p, 1, n)
+        @test_throws StrictViolation (@assert_no_scalar_loops JSON._string_scan_simd(p, 1, n))
+    end
+    # The tail is ACCEPTED (a bounded < 64-byte remainder, like an auto-vectorization epilogue) — F32's
+    # value is making it VISIBLE so the decision is explicit, not silently hidden by a coexisting `<N x>`.
 end

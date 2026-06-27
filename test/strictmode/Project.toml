@@ -6,3 +6,10 @@ Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SIMD = "fdea26ae-647d-5447-a871-4b548cad5224"
 StrictMode = "0e98b4f4-d0e6-42ac-af0a-707c24852f32"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+# Without this the @assert_* macros silently expand to the bare call (StrictMode F1) — the checks never
+# run. Set it so the guarantees (and the F32 @test_throws below) actually exercise the analysis backend.
+[preferences.StrictMode]
+analysis = "full"
+checks_enabled = true
+fail_mode = "error"
